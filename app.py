@@ -151,7 +151,7 @@ st.markdown("""
 
 # ── Sidebar: filtros ───────────────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/7/78/Flag_of_Chile.svg/60px-Flag_of_Chile.svg.png", width=40)
+    #st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/7/78/Flag_of_Chile.svg/60px-Flag_of_Chile.svg.png", width=40)
     st.markdown("### 🔍 Filtros")
     comunas_disp = sorted(df["Comuna"].unique())
     comunas_sel = st.multiselect(
@@ -161,7 +161,7 @@ with st.sidebar:
         format_func=lambda c: f"{COMUNA_CONFIG[c]['emoji']} {c.title()}"
     )
     busqueda = st.text_input("🔎 Buscar establecimiento", placeholder="Nombre o dirección...")
-    cluster_on = st.toggle("Agrupar marcadores (Cluster)", value=True)
+    #cluster_on = st.toggle("Agrupar marcadores (Cluster)", value=True)
     st.markdown("---")
     st.markdown("#### 🎨 Leyenda")
     for c, cfg in COMUNA_CONFIG.items():
@@ -278,6 +278,6 @@ with st.expander("📋 Ver listado completo de establecimientos", expanded=False
 
 st.markdown(
     "<div style='text-align:center;color:#94a3b8;font-size:.78rem;margin-top:1rem;'>"
-    "SLEP Santa Corina · Departamento de Monitoreo y Seguimiento (JISC) · 2025</div>",
+    "SLEP Santa Corina · Departamento de Monitoreo y Seguimiento · 2026</div>",
     unsafe_allow_html=True
 )
