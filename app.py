@@ -161,7 +161,7 @@ with st.sidebar:
         format_func=lambda c: f"{COMUNA_CONFIG[c]['emoji']} {c.title()}"
     )
     busqueda = st.text_input("🔎 Buscar establecimiento", placeholder="Nombre o dirección...")
-    #cluster_on = st.toggle("Agrupar marcadores (Cluster)", value=True)
+    cluster_on = st.toggle("Agrupar marcadores (Cluster)", value=True)
     st.markdown("---")
     st.markdown("#### 🎨 Leyenda")
     for c, cfg in COMUNA_CONFIG.items():
