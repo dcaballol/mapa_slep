@@ -34,42 +34,33 @@ st.markdown("""
   .metric-label { font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
   .stSelectbox label { font-weight: 600; }
 
-  /* ── Tabs con estilo visual fuerte ── */
+  /* ── Tabs estilo píldora limpio ── */
   .stTabs [data-baseweb="tab-list"] {
-    gap: 8px;
-    background: #e2e8f0;
-    padding: 6px 8px;
-    border-radius: 12px;
+    gap: 6px;
+    background: #dde3ed;
+    padding: 5px 6px;
+    border-radius: 10px;
     margin-bottom: 1rem;
   }
   .stTabs [data-baseweb="tab"] {
     background: transparent;
-    border-radius: 8px;
-    padding: 10px 22px;
-    font-size: 0.95rem;
-    font-weight: 600;
-    color: #475569;
+    border-radius: 7px;
+    padding: 8px 20px;
+    font-size: 0.92rem;
+    font-weight: 500;
+    color: #4a5568;
     border: none;
-    transition: all 0.2s;
   }
   .stTabs [data-baseweb="tab"]:hover {
-    background: #cbd5e1;
-    color: #1e293b;
+    background: rgba(255,255,255,0.6);
+    color: #1a202c;
   }
-  /* Tab activa — Mapa */
-  .stTabs [aria-selected="true"]:nth-child(1),
-  .stTabs [data-baseweb="tab"][aria-selected="true"]:first-child {
-    background: #2563a8 !important;
-    color: white !important;
-    box-shadow: 0 2px 8px rgba(37,99,168,0.35);
-  }
-  /* Tab activa — general */
   .stTabs [aria-selected="true"] {
-    background: #1a3a5c !important;
-    color: white !important;
-    box-shadow: 0 2px 8px rgba(26,58,92,0.3);
+    background: white !important;
+    color: #1a3a5c !important;
+    font-weight: 700 !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.13) !important;
   }
-  /* Quitar la línea roja/azul por defecto de Streamlit */
   .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
   .stTabs [data-baseweb="tab-border"]    { display: none !important; }
 
@@ -457,20 +448,29 @@ with tab_ruta:
         rbds_raw = st.text_area(
             "📋 RBDs a visitar",
             height=200,
-            placeholder="Pega los RBDs aquí, uno por línea:\n\n8518\n8519\n9861\n9863\n9865\n...",
-            help="Acepta RBDs separados por línea, coma, punto y coma o espacio.",
+            placeholder="Pega los RBDs aquí, uno por línea.\nAcepta formato 'RBD - Nombre' o solo el número:\n\n9863 - Liceo Santiago Bueras\n9864\n9865\n...",
+            help="Acepta 'RBD', 'RBD - Nombre', separados por línea, coma o punto y coma.",
         )
 
         st.markdown("**📍 Punto de inicio**")
         orig_tipo = st.radio(
             "Origen",
-            ["Centroide del grupo", "Seleccionar establecimiento", "Coordenadas manuales"],
+            ["Desde una dirección / coordenadas", "Desde un establecimiento de la lista", "Centroide del grupo (automático)"],
             label_visibility="collapsed",
         )
 
-        orig_lat_val, orig_lon_val = -33.48, -70.73
+        # Defaults: SLEP Santa Corina (Estación Central, zona central de colegios)
+        orig_lat_val, orig_lon_val = -33.4650, -70.7020
 
-        if orig_tipo == "Seleccionar establecimiento":
+        if orig_tipo == "Desde una dirección / coordenadas":
+            st.caption("Ingresa las coordenadas de tu punto de partida (puedes obtenerlas haciendo clic derecho en Google Maps).")
+            c1, c2 = st.columns(2)
+            with c1:
+                orig_lat_val = st.number_input("Latitud", value=-33.4650, format="%.4f", step=0.0001)
+            with c2:
+                orig_lon_val = st.number_input("Longitud", value=-70.7020, format="%.4f", step=0.0001)
+
+        elif orig_tipo == "Desde un establecimiento de la lista":
             all_rbds = df["RBD"].tolist()
             orig_sel = st.selectbox(
                 "Establecimiento de inicio",
@@ -479,13 +479,7 @@ with tab_ruta:
             )
             sel_r = df[df["RBD"] == orig_sel].iloc[0]
             orig_lat_val, orig_lon_val = sel_r["LAT"], sel_r["LONG"]
-
-        elif orig_tipo == "Coordenadas manuales":
-            c1, c2 = st.columns(2)
-            with c1:
-                orig_lat_val = st.number_input("Latitud", value=-33.4566, format="%.4f")
-            with c2:
-                orig_lon_val = st.number_input("Longitud", value=-70.6984, format="%.4f")
+            st.caption(f"📍 {sel_r['Dirección']}")
 
         round_trip = st.checkbox("🔄 Ruta circular (volver al origen al final)")
 
@@ -524,7 +518,20 @@ with tab_ruta:
 
         else:
             # ── Parsear RBDs ─────────────────────────────────────────────────
-            tokens = [t.strip() for t in re.split(r'[,;\s\n]+', rbds_raw.strip()) if t.strip()]
+            # Soporta: "9863", "9863 - Santiago Bueras", "9863,9864", etc.
+            tokens = []
+            for line in rbds_raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Extrae números de 4+ dígitos al inicio de la línea (antes del guión o nombre)
+                m = re.match(r'^(\d{4,})', line)
+                if m:
+                    tokens.append(m.group(1))
+                else:
+                    # Fallback: busca números de 4+ dígitos en toda la línea
+                    nums = re.findall(r'\b(\d{4,})\b', line)
+                    tokens.extend(nums)
 
             found, not_found, seen = [], [], set()
             for tok in tokens:
@@ -543,7 +550,7 @@ with tab_ruta:
                     not_found.append(tok)
 
             if not_found:
-                st.warning(f"⚠️ RBDs no encontrados: {', '.join(not_found)}")
+                st.warning(f"⚠️ RBDs no encontrados en la base de datos: {', '.join(not_found)}")
 
             if len(found) < 2:
                 st.error("Se necesitan al menos 2 establecimientos para optimizar una ruta.")
@@ -604,9 +611,10 @@ with tab_ruta:
                 )
                 Fullscreen(position="topleft").add_to(mc)
 
+                # Línea de referencia (no sigue calles — es distancia en línea recta)
                 folium.PolyLine(
-                    route_coords, color="#1a73e8", weight=3,
-                    opacity=0.8, dash_array="8 4",
+                    route_coords, color="#1a73e8", weight=2,
+                    opacity=0.55, dash_array="6 5",
                 ).add_to(mc)
 
                 folium.Marker(
@@ -631,6 +639,7 @@ with tab_ruta:
                     ).add_to(mc)
 
                 st_folium(mc, width="100%", height=440, returned_objects=[])
+                st.caption("ℹ️ Las líneas del mapa son de referencia (distancia recta). La navegación por Google Maps usará calles reales.")
 
                 # ── Métricas ─────────────────────────────────────────────────
                 m1, m2, m3 = st.columns(3)
