@@ -3,6 +3,8 @@ import folium
 from folium.plugins import MarkerCluster, Fullscreen
 from streamlit_folium import st_folium
 import pandas as pd
+import math
+import re
 
 # ── Configuración de página ────────────────────────────────────────────────────
 st.set_page_config(
@@ -11,28 +13,23 @@ st.set_page_config(
     layout="wide",
 )
 
-# ── Estilos CSS personalizados ─────────────────────────────────────────────────
+# ── Estilos CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
   [data-testid="stAppViewContainer"] { background: #f5f7fa; }
   .header-banner {
     background: linear-gradient(135deg, #1a3a5c 0%, #2563a8 100%);
-    padding: 1.2rem 1.8rem;
-    border-radius: 12px;
-    color: white;
-    margin-bottom: 1.2rem;
+    padding: 1.2rem 1.8rem; border-radius: 12px;
+    color: white; margin-bottom: 1.2rem;
   }
   .header-banner h1 { margin: 0; font-size: 1.6rem; font-weight: 700; }
   .header-banner p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.85; }
   .metric-card {
-    background: white;
-    border-radius: 10px;
-    padding: 1rem;
-    text-align: center;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    background: white; border-radius: 10px; padding: 1rem;
+    text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
   }
-  .metric-num  { font-size: 2rem; font-weight: 700; color: #2563a8; }
-  .metric-label{ font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
+  .metric-num   { font-size: 2rem; font-weight: 700; color: #2563a8; }
+  .metric-label { font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
   .stSelectbox label { font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
@@ -134,12 +131,122 @@ RAW = [
 
 df = pd.DataFrame(RAW, columns=["RBD","Establecimiento","Comuna","Dirección","LAT","LONG"])
 
-# ── Colores y emojis por comuna ────────────────────────────────────────────────
 COMUNA_CONFIG = {
     "ESTACIÓN CENTRAL": {"color": "#e74c3c", "folium_color": "red",    "emoji": "🔴"},
     "CERRILLOS":        {"color": "#f39c12", "folium_color": "orange",  "emoji": "🟠"},
     "MAIPÚ":            {"color": "#27ae60", "folium_color": "green",   "emoji": "🟢"},
 }
+
+# ── Funciones de optimización de ruta ─────────────────────────────────────────
+
+try:
+    import googlemaps as _gm
+    _GMAPS_OK = True
+except ImportError:
+    _GMAPS_OK = False
+
+
+def _haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    r1, r2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(r1)*math.cos(r2)*math.sin(dl/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+
+def _haversine_matrix(coords):
+    n = len(coords)
+    return [[_haversine(coords[i][0], coords[i][1], coords[j][0], coords[j][1])
+             for j in range(n)] for i in range(n)]
+
+
+def _gmaps_matrix(coords, key, mode):
+    client = _gm.Client(key=key)
+    n = len(coords)
+    mat = [[0.0]*n for _ in range(n)]
+    dur = [[0.0]*n for _ in range(n)]
+    strs = [f"{c[0]:.6f},{c[1]:.6f}" for c in coords]
+    for i in range(0, n, 25):
+        for j in range(0, n, 25):
+            res = client.distance_matrix(strs[i:i+25], strs[j:j+25], mode=mode)
+            for ri, row in enumerate(res['rows']):
+                for rj, el in enumerate(row['elements']):
+                    gi, gj = i + ri, j + rj
+                    if el['status'] == 'OK':
+                        mat[gi][gj] = el['distance']['value'] / 1000
+                        dur[gi][gj] = el['duration']['value'] / 60
+                    else:
+                        mat[gi][gj] = _haversine(*coords[gi], *coords[gj])
+                        dur[gi][gj] = mat[gi][gj] * 2
+    return mat, dur
+
+
+def _nn_route(mat):
+    n = len(mat)
+    vis = [False] * n
+    route = [0]
+    vis[0] = True
+    for _ in range(n - 1):
+        cur = route[-1]
+        nxt = min((j for j in range(n) if not vis[j]), key=lambda j: mat[cur][j])
+        route.append(nxt)
+        vis[nxt] = True
+    return route
+
+
+def _two_opt(route, mat):
+    best = list(route)
+    n = len(best)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, n - 1):
+            for j in range(i + 1, n):
+                a, b = best[i - 1], best[i]
+                c = best[j]
+                d = best[j + 1] if j + 1 < n else None
+                delta = (mat[a][c] + (mat[b][d] if d is not None else 0)
+                         - mat[a][b] - (mat[c][d] if d is not None else 0))
+                if delta < -1e-9:
+                    best[i:j + 1] = best[i:j + 1][::-1]
+                    improved = True
+    return best
+
+
+def _gmaps_urls(route_coords, gmode):
+    urls = []
+    n = len(route_coords)
+    chunk = 23
+    i = 0
+    while i < n - 1:
+        ei = min(i + chunk + 1, n - 1)
+        origin = route_coords[i]
+        dest = route_coords[ei]
+        wps = route_coords[i + 1:ei]
+        url = (f"https://www.google.com/maps/dir/?api=1"
+               f"&origin={origin[0]:.6f},{origin[1]:.6f}"
+               f"&destination={dest[0]:.6f},{dest[1]:.6f}"
+               f"&travelmode={gmode}")
+        if wps:
+            url += "&waypoints=" + "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in wps)
+        urls.append(url)
+        i = ei
+        if i >= n - 1:
+            break
+    return urls
+
+
+def _num_icon(n, color="#1a3a5c"):
+    return folium.DivIcon(
+        html=(f'<div style="background:{color};color:white;border-radius:50%;'
+              f'width:28px;height:28px;line-height:28px;text-align:center;'
+              f'font-weight:700;font-size:12px;border:2px solid white;'
+              f'box-shadow:0 2px 6px rgba(0,0,0,.35);">{n}</div>'),
+        icon_size=(28, 28),
+        icon_anchor=(14, 14),
+    )
+
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -149,10 +256,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Sidebar: filtros ───────────────────────────────────────────────────────────
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/7/78/Flag_of_Chile.svg/60px-Flag_of_Chile.svg.png", width=40)
-    st.markdown("### 🔍 Filtros")
+    st.markdown("### 🔍 Filtros (Mapa)")
     comunas_disp = sorted(df["Comuna"].unique())
     comunas_sel = st.multiselect(
         "Comunas",
@@ -167,156 +274,329 @@ with st.sidebar:
     for c, cfg in COMUNA_CONFIG.items():
         st.markdown(f"{cfg['emoji']} **{c.title()}**")
 
-# ── Filtrado ───────────────────────────────────────────────────────────────────
-dff = df[df["Comuna"].isin(comunas_sel)].copy()
-if busqueda:
-    mask = (
-        dff["Establecimiento"].str.contains(busqueda, case=False, na=False) |
-        dff["Dirección"].str.contains(busqueda, case=False, na=False)
-    )
-    dff = dff[mask]
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab_mapa, tab_ruta = st.tabs(["🗺️ Mapa de Establecimientos", "🛣️ Optimizar Ruta de Visitas"])
 
-# ── Métricas ───────────────────────────────────────────────────────────────────
-col1, col2, col3, col4 = st.columns(4)
-totales = {c: len(df[df["Comuna"]==c]) for c in comunas_disp}
-with col1:
-    st.markdown(f'<div class="metric-card"><div class="metric-num">{len(dff)}</div><div class="metric-label">Establecimientos visibles</div></div>', unsafe_allow_html=True)
-with col2:
-    st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#e74c3c">{totales["ESTACIÓN CENTRAL"]}</div><div class="metric-label">🔴 Estación Central</div></div>', unsafe_allow_html=True)
-with col3:
-    st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#f39c12">{totales["CERRILLOS"]}</div><div class="metric-label">🟠 Cerrillos</div></div>', unsafe_allow_html=True)
-with col4:
-    st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#27ae60">{totales["MAIPÚ"]}</div><div class="metric-label">🟢 Maipú</div></div>', unsafe_allow_html=True)
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Mapa
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_mapa:
+    dff = df[df["Comuna"].isin(comunas_sel)].copy()
+    if busqueda:
+        mask = (
+            dff["Establecimiento"].str.contains(busqueda, case=False, na=False) |
+            dff["Dirección"].str.contains(busqueda, case=False, na=False)
+        )
+        dff = dff[mask]
 
-st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    totales = {c: len(df[df["Comuna"] == c]) for c in comunas_disp}
+    with col1:
+        st.markdown(f'<div class="metric-card"><div class="metric-num">{len(dff)}</div><div class="metric-label">Establecimientos visibles</div></div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#e74c3c">{totales["ESTACIÓN CENTRAL"]}</div><div class="metric-label">🔴 Estación Central</div></div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#f39c12">{totales["CERRILLOS"]}</div><div class="metric-label">🟠 Cerrillos</div></div>', unsafe_allow_html=True)
+    with col4:
+        st.markdown(f'<div class="metric-card"><div class="metric-num" style="color:#27ae60">{totales["MAIPÚ"]}</div><div class="metric-label">🟢 Maipú</div></div>', unsafe_allow_html=True)
 
-# ── Mapa Folium ────────────────────────────────────────────────────────────────
-centro_lat = dff["LAT"].mean() if len(dff) > 0 else -33.50
-centro_lon = dff["LONG"].mean() if len(dff) > 0 else -70.75
+    st.markdown("<br>", unsafe_allow_html=True)
 
-m = folium.Map(
-    location=[centro_lat, centro_lon],
-    zoom_start=12,
-    tiles="CartoDB positron",
-    control_scale=True,
-)
+    centro_lat = dff["LAT"].mean() if len(dff) > 0 else -33.50
+    centro_lon = dff["LONG"].mean() if len(dff) > 0 else -70.75
 
-# Capas de tiles adicionales
-folium.TileLayer("OpenStreetMap",    name="OpenStreetMap").add_to(m)
-folium.TileLayer("CartoDB dark_matter", name="Modo oscuro").add_to(m)
-folium.LayerControl(position="topright").add_to(m)
-Fullscreen(position="topleft").add_to(m)
+    m = folium.Map(location=[centro_lat, centro_lon], zoom_start=12,
+                   tiles="CartoDB positron", control_scale=True)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(m)
+    folium.TileLayer("CartoDB dark_matter", name="Modo oscuro").add_to(m)
+    folium.LayerControl(position="topright").add_to(m)
+    Fullscreen(position="topleft").add_to(m)
 
-# Capas por comuna
-layers = {}
-for c in comunas_disp:
-    fg = folium.FeatureGroup(name=f"{COMUNA_CONFIG[c]['emoji']} {c.title()}", show=(c in comunas_sel))
-    layers[c] = fg
+    group = MarkerCluster(name="Agrupados", show=cluster_on).add_to(m) if cluster_on else m
 
-# Marcadores
-group = MarkerCluster(name="Agrupados", show=cluster_on).add_to(m) if cluster_on else m
-
-for _, row in dff.iterrows():
-    cfg = COMUNA_CONFIG.get(row["Comuna"], {"folium_color":"blue","emoji":"🔵","color":"#3498db"})
-    gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=driving"
-    gmaps_walk = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=walking"
-    gmaps_transit = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=transit"
-    popup_html = f"""
-    <div style="font-family:Arial,sans-serif;min-width:250px;max-width:300px;">
-      <div style="background:{cfg['color']};color:white;padding:8px 12px;border-radius:6px 6px 0 0;font-weight:700;font-size:13px;">
-        {cfg['emoji']} {row['Establecimiento']}
-      </div>
-      <div style="padding:10px 12px;background:#fff;border-radius:0 0 6px 6px;border:1px solid #e2e8f0;">
-        <p style="margin:4px 0;font-size:12px;"><b>📍 Dirección:</b> {row['Dirección']}</p>
-        <p style="margin:4px 0;font-size:12px;"><b>🏘️ Comuna:</b> {row['Comuna'].title()}</p>
-        <p style="margin:4px 0;font-size:12px;"><b>🔑 RBD/Cód.:</b> {row['RBD']}</p>
-        <p style="margin:4px 0;font-size:11px;color:#64748b;">📌 {row['LAT']:.6f}, {row['LONG']:.6f}</p>
-        <hr style="margin:8px 0;border:none;border-top:1px solid #e2e8f0;">
-        <p style="margin:4px 0 6px;font-size:11px;font-weight:700;color:#475569;">🗺️ CÓMO LLEGAR</p>
-        <div style="display:flex;gap:5px;flex-wrap:wrap;">
-          <a href="{gmaps_url}" target="_blank"
-             style="background:#1a73e8;color:white;padding:5px 9px;border-radius:5px;
-                    text-decoration:none;font-size:11px;font-weight:600;">
-            🚗 En auto
-          </a>
-          <a href="{gmaps_transit}" target="_blank"
-             style="background:#0f9d58;color:white;padding:5px 9px;border-radius:5px;
-                    text-decoration:none;font-size:11px;font-weight:600;">
-            🚌 Transporte
-          </a>
-          <a href="{gmaps_walk}" target="_blank"
-             style="background:#f57c00;color:white;padding:5px 9px;border-radius:5px;
-                    text-decoration:none;font-size:11px;font-weight:600;">
-            🚶 A pie
-          </a>
-        </div>
-      </div>
-    </div>
-    """
-    tooltip = f"{cfg['emoji']} {row['Establecimiento']}"
-    marker = folium.Marker(
-        location=[row["LAT"], row["LONG"]],
-        popup=folium.Popup(popup_html, max_width=300),
-        tooltip=tooltip,
-        icon=folium.Icon(color=cfg["folium_color"], icon="graduation-cap", prefix="fa"),
-    )
-    marker.add_to(group if cluster_on else m)
-
-# Renderizar mapa
-map_data = st_folium(m, width="100%", height=580, returned_objects=["last_object_clicked"])
-
-# ── Detalle del marcador clickeado ─────────────────────────────────────────────
-if map_data and map_data.get("last_object_clicked"):
-    clicked = map_data["last_object_clicked"]
-    lat_c, lon_c = clicked.get("lat"), clicked.get("lng")
-    if lat_c and lon_c:
-        match = dff[(abs(dff["LAT"]-lat_c)<0.0005) & (abs(dff["LONG"]-lon_c)<0.0005)]
-        if not match.empty:
-            r = match.iloc[0]
-            cfg = COMUNA_CONFIG.get(r["Comuna"], {"color":"#3498db","emoji":"🔵"})
-            gm_auto     = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=driving"
-            gm_transito = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=transit"
-            gm_pie      = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=walking"
-            st.markdown(f"""
-            <div style="background:white;border-left:5px solid {cfg['color']};
-                        padding:1rem 1.4rem;border-radius:8px;margin-top:.5rem;
-                        box-shadow:0 2px 8px rgba(0,0,0,.08);">
-              <h4 style="margin:0 0 .4rem;color:{cfg['color']};">{cfg['emoji']} {r['Establecimiento']}</h4>
-              <p style="margin:.2rem 0;font-size:.9rem;">📍 {r['Dirección']}</p>
-              <p style="margin:.2rem 0 .7rem;font-size:.9rem;">🏘️ {r['Comuna'].title()} &nbsp;|&nbsp; 🔑 RBD: {r['RBD']}</p>
-              <p style="margin:0 0 .4rem;font-size:.8rem;font-weight:700;color:#475569;">🗺️ CÓMO LLEGAR</p>
-              <a href="{gm_auto}" target="_blank"
-                 style="background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;
-                        text-decoration:none;font-size:.82rem;font-weight:600;margin-right:6px;">
-                🚗 En auto
-              </a>
-              <a href="{gm_transito}" target="_blank"
-                 style="background:#0f9d58;color:white;padding:6px 12px;border-radius:6px;
-                        text-decoration:none;font-size:.82rem;font-weight:600;margin-right:6px;">
-                🚌 Transporte público
-              </a>
-              <a href="{gm_pie}" target="_blank"
-                 style="background:#f57c00;color:white;padding:6px 12px;border-radius:6px;
-                        text-decoration:none;font-size:.82rem;font-weight:600;">
-                🚶 A pie
-              </a>
+    for _, row in dff.iterrows():
+        cfg = COMUNA_CONFIG.get(row["Comuna"], {"folium_color": "blue", "emoji": "🔵", "color": "#3498db"})
+        gmaps_url     = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=driving"
+        gmaps_walk    = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=walking"
+        gmaps_transit = f"https://www.google.com/maps/dir/?api=1&destination={row['LAT']},{row['LONG']}&travelmode=transit"
+        popup_html = f"""
+        <div style="font-family:Arial,sans-serif;min-width:250px;max-width:300px;">
+          <div style="background:{cfg['color']};color:white;padding:8px 12px;border-radius:6px 6px 0 0;font-weight:700;font-size:13px;">
+            {cfg['emoji']} {row['Establecimiento']}
+          </div>
+          <div style="padding:10px 12px;background:#fff;border-radius:0 0 6px 6px;border:1px solid #e2e8f0;">
+            <p style="margin:4px 0;font-size:12px;"><b>📍 Dirección:</b> {row['Dirección']}</p>
+            <p style="margin:4px 0;font-size:12px;"><b>🏘️ Comuna:</b> {row['Comuna'].title()}</p>
+            <p style="margin:4px 0;font-size:12px;"><b>🔑 RBD/Cód.:</b> {row['RBD']}</p>
+            <p style="margin:4px 0;font-size:11px;color:#64748b;">📌 {row['LAT']:.6f}, {row['LONG']:.6f}</p>
+            <hr style="margin:8px 0;border:none;border-top:1px solid #e2e8f0;">
+            <p style="margin:4px 0 6px;font-size:11px;font-weight:700;color:#475569;">🗺️ CÓMO LLEGAR</p>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;">
+              <a href="{gmaps_url}" target="_blank" style="background:#1a73e8;color:white;padding:5px 9px;border-radius:5px;text-decoration:none;font-size:11px;font-weight:600;">🚗 En auto</a>
+              <a href="{gmaps_transit}" target="_blank" style="background:#0f9d58;color:white;padding:5px 9px;border-radius:5px;text-decoration:none;font-size:11px;font-weight:600;">🚌 Transporte</a>
+              <a href="{gmaps_walk}" target="_blank" style="background:#f57c00;color:white;padding:5px 9px;border-radius:5px;text-decoration:none;font-size:11px;font-weight:600;">🚶 A pie</a>
             </div>
-            """, unsafe_allow_html=True)
+          </div>
+        </div>"""
+        folium.Marker(
+            location=[row["LAT"], row["LONG"]],
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip=f"{cfg['emoji']} {row['Establecimiento']}",
+            icon=folium.Icon(color=cfg["folium_color"], icon="graduation-cap", prefix="fa"),
+        ).add_to(group if cluster_on else m)
 
-# ── Tabla de datos ─────────────────────────────────────────────────────────────
-with st.expander("📋 Tabla de datos — listado completo de establecimientos (91)", expanded=False):
-    st.dataframe(
-        dff[["RBD","Establecimiento","Comuna","Dirección"]].rename(columns={
-            "RBD":"RBD / Cód. JUNJI",
-            "Establecimiento":"Nombre",
-            "Dirección":"Dirección",
-        }),
-        use_container_width=True,
-        hide_index=True,
-    )
+    map_data = st_folium(m, width="100%", height=580, returned_objects=["last_object_clicked"])
 
+    if map_data and map_data.get("last_object_clicked"):
+        clicked = map_data["last_object_clicked"]
+        lat_c, lon_c = clicked.get("lat"), clicked.get("lng")
+        if lat_c and lon_c:
+            match = dff[(abs(dff["LAT"] - lat_c) < 0.0005) & (abs(dff["LONG"] - lon_c) < 0.0005)]
+            if not match.empty:
+                r = match.iloc[0]
+                cfg = COMUNA_CONFIG.get(r["Comuna"], {"color": "#3498db", "emoji": "🔵"})
+                gm_auto     = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=driving"
+                gm_transito = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=transit"
+                gm_pie      = f"https://www.google.com/maps/dir/?api=1&destination={r['LAT']},{r['LONG']}&travelmode=walking"
+                st.markdown(f"""
+                <div style="background:white;border-left:5px solid {cfg['color']};padding:1rem 1.4rem;border-radius:8px;margin-top:.5rem;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+                  <h4 style="margin:0 0 .4rem;color:{cfg['color']};">{cfg['emoji']} {r['Establecimiento']}</h4>
+                  <p style="margin:.2rem 0;font-size:.9rem;">📍 {r['Dirección']}</p>
+                  <p style="margin:.2rem 0 .7rem;font-size:.9rem;">🏘️ {r['Comuna'].title()} &nbsp;|&nbsp; 🔑 RBD: {r['RBD']}</p>
+                  <p style="margin:0 0 .4rem;font-size:.8rem;font-weight:700;color:#475569;">🗺️ CÓMO LLEGAR</p>
+                  <a href="{gm_auto}" target="_blank" style="background:#1a73e8;color:white;padding:6px 12px;border-radius:6px;text-decoration:none;font-size:.82rem;font-weight:600;margin-right:6px;">🚗 En auto</a>
+                  <a href="{gm_transito}" target="_blank" style="background:#0f9d58;color:white;padding:6px 12px;border-radius:6px;text-decoration:none;font-size:.82rem;font-weight:600;margin-right:6px;">🚌 Transporte público</a>
+                  <a href="{gm_pie}" target="_blank" style="background:#f57c00;color:white;padding:6px 12px;border-radius:6px;text-decoration:none;font-size:.82rem;font-weight:600;">🚶 A pie</a>
+                </div>""", unsafe_allow_html=True)
+
+    with st.expander("📋 Tabla de datos — listado completo de establecimientos", expanded=False):
+        st.dataframe(
+            dff[["RBD", "Establecimiento", "Comuna", "Dirección"]].rename(columns={"RBD": "RBD / Cód. JUNJI", "Establecimiento": "Nombre"}),
+            use_container_width=True, hide_index=True,
+        )
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Optimizar Ruta
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_ruta:
+    st.markdown("### 🛣️ Optimizador de Ruta de Visitas")
+    st.caption("Ingresa los RBD de los establecimientos que necesitas visitar. La app calcula el orden óptimo de visitas usando Vecino Más Cercano + mejora 2-opt.")
+
+    col_ctrl, col_res = st.columns([1, 2], gap="medium")
+
+    with col_ctrl:
+        rbds_raw = st.text_area(
+            "📋 RBDs a visitar",
+            height=200,
+            placeholder="Pega los RBDs aquí, uno por línea:\n\n8518\n8519\n9861\n9863\n9865\n...",
+            help="Acepta RBDs separados por línea, coma, punto y coma o espacio.",
+        )
+
+        st.markdown("**📍 Punto de inicio**")
+        orig_tipo = st.radio(
+            "Origen",
+            ["Centroide del grupo", "Seleccionar establecimiento", "Coordenadas manuales"],
+            label_visibility="collapsed",
+        )
+
+        orig_lat_val, orig_lon_val = -33.48, -70.73
+
+        if orig_tipo == "Seleccionar establecimiento":
+            all_rbds = df["RBD"].tolist()
+            orig_sel = st.selectbox(
+                "Establecimiento de inicio",
+                options=all_rbds,
+                format_func=lambda r: f"{r} · {df[df['RBD'] == r]['Establecimiento'].values[0]}",
+            )
+            sel_r = df[df["RBD"] == orig_sel].iloc[0]
+            orig_lat_val, orig_lon_val = sel_r["LAT"], sel_r["LONG"]
+
+        elif orig_tipo == "Coordenadas manuales":
+            c1, c2 = st.columns(2)
+            with c1:
+                orig_lat_val = st.number_input("Latitud", value=-33.4566, format="%.4f")
+            with c2:
+                orig_lon_val = st.number_input("Longitud", value=-70.6984, format="%.4f")
+
+        round_trip = st.checkbox("🔄 Ruta circular (volver al origen al final)")
+
+        modo_opts = {"🚗 Auto": "driving", "🚌 Transporte público": "transit", "🚶 A pie": "walking"}
+        modo_label = st.radio("Modo de viaje", list(modo_opts.keys()))
+        gmode = modo_opts[modo_label]
+
+        with st.expander("⚙️ Configuración avanzada"):
+            api_key_in = st.text_input(
+                "API Key Google Maps (opcional)",
+                type="password",
+                help="Con una API Key se calculan distancias reales de ruta (Distance Matrix API). Sin ella se usa distancia en línea recta (Haversine).",
+            )
+            if api_key_in and not _GMAPS_OK:
+                st.warning("Para usar la API instala: `pip install googlemaps`")
+            use_2opt = st.checkbox(
+                "Mejorar con 2-opt",
+                value=True,
+                help="Aplica mejora local sobre la ruta inicial. Para más de 25 paradas se omite automáticamente.",
+            )
+
+        calcular = st.button("🔄 Calcular Ruta Óptima", type="primary", use_container_width=True)
+
+    with col_res:
+        if not calcular:
+            st.info("👈 Ingresa los RBDs a la izquierda y presiona **Calcular Ruta Óptima**.")
+            m_prev = folium.Map(location=[-33.49, -70.74], zoom_start=12, tiles="CartoDB positron")
+            for _, row in df.iterrows():
+                cfg = COMUNA_CONFIG.get(row["Comuna"], {"color": "#3498db"})
+                folium.CircleMarker(
+                    [row["LAT"], row["LONG"]], radius=5,
+                    color=cfg["color"], fill=True, fill_opacity=0.4,
+                    tooltip=f"{row['RBD']} · {row['Establecimiento']}",
+                ).add_to(m_prev)
+            st_folium(m_prev, width="100%", height=500, returned_objects=[])
+
+        else:
+            # ── Parsear RBDs ─────────────────────────────────────────────────
+            tokens = [t.strip() for t in re.split(r'[,;\s\n]+', rbds_raw.strip()) if t.strip()]
+
+            found, not_found, seen = [], [], set()
+            for tok in tokens:
+                match = df[df["RBD"].astype(str) == tok]
+                if match.empty:
+                    try:
+                        match = df[df["RBD"] == int(tok)]
+                    except (ValueError, TypeError):
+                        pass
+                if not match.empty:
+                    key = str(match.iloc[0]["RBD"])
+                    if key not in seen:
+                        found.append(match.iloc[0])
+                        seen.add(key)
+                else:
+                    not_found.append(tok)
+
+            if not_found:
+                st.warning(f"⚠️ RBDs no encontrados: {', '.join(not_found)}")
+
+            if len(found) < 2:
+                st.error("Se necesitan al menos 2 establecimientos para optimizar una ruta.")
+            else:
+                school_df = pd.DataFrame(found).reset_index(drop=True)
+                n_schools = len(school_df)
+
+                if orig_tipo == "Centroide del grupo":
+                    orig_lat = float(school_df["LAT"].mean())
+                    orig_lon = float(school_df["LONG"].mean())
+                else:
+                    orig_lat, orig_lon = orig_lat_val, orig_lon_val
+
+                # coords: index 0 = origen, 1..n = colegios
+                coords = [(orig_lat, orig_lon)] + list(zip(school_df["LAT"], school_df["LONG"]))
+
+                use_api = bool(api_key_in and _GMAPS_OK)
+                dur_mat = None
+
+                with st.spinner("Calculando distancias..."):
+                    if use_api:
+                        try:
+                            mat, dur_mat = _gmaps_matrix(coords, api_key_in, gmode)
+                            st.success("✅ Usando distancias reales de Google Maps (Distance Matrix API)")
+                        except Exception as exc:
+                            st.warning(f"Error con la API: {exc}. Se usará Haversine.")
+                            mat = _haversine_matrix(coords)
+                    else:
+                        mat = _haversine_matrix(coords)
+
+                with st.spinner("Optimizando ruta..."):
+                    route = _nn_route(mat)
+                    if use_2opt:
+                        if n_schools <= 25:
+                            route = _two_opt(route, mat)
+                        else:
+                            st.caption("ℹ️ 2-opt omitido (más de 25 paradas). Se usa el resultado del Vecino Más Cercano.")
+
+                # Índices de colegios en school_df
+                school_indices = [r - 1 for r in route[1:]]
+                ordered = school_df.iloc[school_indices].reset_index(drop=True)
+
+                route_coords = [(orig_lat, orig_lon)] + list(zip(ordered["LAT"], ordered["LONG"]))
+                if round_trip:
+                    route_coords.append((orig_lat, orig_lon))
+
+                total_km = sum(
+                    _haversine(route_coords[i][0], route_coords[i][1],
+                               route_coords[i + 1][0], route_coords[i + 1][1])
+                    for i in range(len(route_coords) - 1)
+                )
+
+                # ── Mapa de ruta ─────────────────────────────────────────────
+                mc = folium.Map(
+                    location=[(orig_lat + float(ordered["LAT"].mean())) / 2,
+                               (orig_lon + float(ordered["LONG"].mean())) / 2],
+                    zoom_start=12, tiles="CartoDB positron", control_scale=True,
+                )
+                Fullscreen(position="topleft").add_to(mc)
+
+                folium.PolyLine(
+                    route_coords, color="#1a73e8", weight=3,
+                    opacity=0.8, dash_array="8 4",
+                ).add_to(mc)
+
+                folium.Marker(
+                    [orig_lat, orig_lon],
+                    popup="📍 Punto de inicio",
+                    tooltip="📍 Inicio",
+                    icon=folium.Icon(color="blue", icon="home", prefix="fa"),
+                ).add_to(mc)
+
+                for i, (_, row) in enumerate(ordered.iterrows()):
+                    cfg = COMUNA_CONFIG.get(row["Comuna"], {"color": "#3498db"})
+                    popup_html = (
+                        f"<b>Parada #{i + 1}</b><br>"
+                        f"<b>{row['Establecimiento']}</b><br>"
+                        f"<small>📍 {row['Dirección']}<br>🔑 RBD: {row['RBD']}</small>"
+                    )
+                    folium.Marker(
+                        [row["LAT"], row["LONG"]],
+                        popup=folium.Popup(popup_html, max_width=240),
+                        tooltip=f"#{i + 1} · {row['Establecimiento']}",
+                        icon=_num_icon(i + 1, cfg["color"]),
+                    ).add_to(mc)
+
+                st_folium(mc, width="100%", height=440, returned_objects=[])
+
+                # ── Métricas ─────────────────────────────────────────────────
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Paradas", n_schools)
+                with m2:
+                    st.metric("Distancia total (aprox.)", f"{total_km:.1f} km")
+                with m3:
+                    st.metric("Distancias usadas", "Ruta real" if use_api else "Línea recta")
+
+                # ── Google Maps URLs ──────────────────────────────────────────
+                gmaps_urls = _gmaps_urls(route_coords, gmode)
+                st.markdown("**🗺️ Abrir en Google Maps**")
+                if len(gmaps_urls) == 1:
+                    st.link_button(
+                        f"Navegar ruta completa ({n_schools} paradas)",
+                        gmaps_urls[0],
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption(f"Ruta dividida en {len(gmaps_urls)} tramos (límite de 25 paradas por URL).")
+                    cols_url = st.columns(len(gmaps_urls))
+                    for i, url in enumerate(gmaps_urls):
+                        with cols_url[i]:
+                            st.link_button(f"Tramo {i + 1}", url, use_container_width=True)
+
+                # ── Tabla de orden ────────────────────────────────────────────
+                with st.expander("📋 Ver orden completo de visitas", expanded=True):
+                    disp = ordered[["RBD", "Establecimiento", "Comuna", "Dirección"]].copy()
+                    disp.insert(0, "#", range(1, len(disp) + 1))
+                    st.dataframe(disp, use_container_width=True, hide_index=True)
+
+# ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown(
     "<div style='text-align:center;color:#94a3b8;font-size:.78rem;margin-top:1rem;'>"
     "SLEP Santa Corina · Departamento de Monitoreo y Seguimiento (JISC) · 2025</div>",
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
