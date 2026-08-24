@@ -72,6 +72,34 @@ st.markdown("""
   /* Quitar la línea roja/azul por defecto de Streamlit */
   .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
   .stTabs [data-baseweb="tab-border"]    { display: none !important; }
+
+  /* ── Forzar legibilidad en widgets del formulario ── */
+  .stRadio label,
+  .stRadio label span,
+  .stCheckbox label,
+  .stCheckbox label span,
+  .stSelectbox label,
+  .stTextInput label,
+  .stTextArea label,
+  .stNumberInput label,
+  [data-testid="stWidgetLabel"],
+  [data-testid="stWidgetLabel"] p,
+  [data-testid="stMarkdownContainer"] p,
+  .stRadio [data-testid="stMarkdownContainer"] p {
+    color: #1e293b !important;
+  }
+
+  /* Expander header */
+  .streamlit-expanderHeader,
+  .streamlit-expanderHeader p {
+    color: #1e293b !important;
+    font-weight: 600;
+  }
+
+  /* Caption / small text */
+  .stCaption, [data-testid="stCaptionContainer"] {
+    color: #475569 !important;
+  }
 </style>
 """, unsafe_allow_html=True)
 
