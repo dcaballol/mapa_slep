@@ -251,20 +251,30 @@ def _two_opt(route, mat):
 
 
 def _gmaps_urls(route_coords, gmode):
-    """Genera URLs de Google Maps formato /dir/ (máx 9 paradas por URL, más fiable).
+    """URL de Google Maps con todas las paradas en una sola URL cuando es posible.
+    Usa formato ?api=1 (hasta 23 waypoints = 25 paradas totales por URL).
+    Solo divide si hay más de 25 paradas totales.
     gmode: 'driving' | 'transit' | 'walking'
     """
     urls = []
     n = len(route_coords)
-    chunk = 8  # 9 paradas por URL (8 segmentos), más fiable que usar waypoints=
+    chunk = 23  # 23 waypoints + origen + destino = 25 paradas totales por URL
     i = 0
     while i < n - 1:
-        ei = min(i + chunk, n - 1)
-        group = route_coords[i:ei + 1]
-        stops = "/".join(f"{lat:.6f},{lon:.6f}" for lat, lon in group)
-        url = f"https://www.google.com/maps/dir/{stops}/"
+        ei = min(i + chunk + 1, n - 1)
+        origin = route_coords[i]
+        dest   = route_coords[ei]
+        wps    = route_coords[i + 1:ei]
+        url = (f"https://www.google.com/maps/dir/?api=1"
+               f"&origin={origin[0]:.6f},{origin[1]:.6f}"
+               f"&destination={dest[0]:.6f},{dest[1]:.6f}"
+               f"&travelmode={gmode}")
+        if wps:
+            url += "&waypoints=" + "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in wps)
         urls.append(url)
         i = ei
+        if i >= n - 1:
+            break
     return urls
 
 
@@ -667,26 +677,26 @@ with tab_ruta:
                 st.markdown("**🗺️ Abrir en Google Maps**")
                 if len(gmaps_urls) == 1:
                     st.link_button(
-                        f"🚗 Navegar ruta completa ({n_schools} paradas)",
+                        f"🗺️ Navegar ruta completa ({n_schools} paradas)",
                         gmaps_urls[0],
                         use_container_width=True,
                     )
                 else:
+                    chunk_size = 23
                     st.caption(
                         f"Ruta dividida en {len(gmaps_urls)} tramos "
-                        f"(Google Maps soporta máx. 9 paradas por URL). "
+                        f"(más de 25 paradas — límite de Google Maps). "
                         f"Abre cada tramo en orden."
                     )
-                    # Calcular rangos de paradas por tramo
-                    chunk = 8
                     cols_url = st.columns(len(gmaps_urls))
                     for idx, url in enumerate(gmaps_urls):
-                        start_stop = idx * chunk
-                        end_stop = min(start_stop + chunk, n_schools)
+                        inicio = idx * chunk_size + 1
+                        fin = min(inicio + chunk_size - 1, n_schools)
                         with cols_url[idx]:
-                            label = (f"Tramo {idx+1}\n"
-                                     f"Paradas {start_stop}→{end_stop}")
-                            st.link_button(label, url, use_container_width=True)
+                            st.link_button(
+                                f"Tramo {idx + 1}  (paradas {inicio}–{fin})",
+                                url, use_container_width=True,
+                            )
 
                 # ── Tabla de orden ────────────────────────────────────────────
                 with st.expander("📋 Ver orden completo de visitas", expanded=True):
