@@ -251,31 +251,26 @@ def _two_opt(route, mat):
 
 
 def _gmaps_urls(route_coords, gmode):
+    """Genera URLs de Google Maps formato /dir/ (máx 9 paradas por URL, más fiable).
+    gmode: 'driving' | 'transit' | 'walking'
+    """
     urls = []
     n = len(route_coords)
-    chunk = 23
+    chunk = 8  # 9 paradas por URL (8 segmentos), más fiable que usar waypoints=
     i = 0
     while i < n - 1:
-        ei = min(i + chunk + 1, n - 1)
-        origin = route_coords[i]
-        dest = route_coords[ei]
-        wps = route_coords[i + 1:ei]
-        url = (f"https://www.google.com/maps/dir/?api=1"
-               f"&origin={origin[0]:.6f},{origin[1]:.6f}"
-               f"&destination={dest[0]:.6f},{dest[1]:.6f}"
-               f"&travelmode={gmode}")
-        if wps:
-            url += "&waypoints=" + "|".join(f"{p[0]:.6f},{p[1]:.6f}" for p in wps)
+        ei = min(i + chunk, n - 1)
+        group = route_coords[i:ei + 1]
+        stops = "/".join(f"{lat:.6f},{lon:.6f}" for lat, lon in group)
+        url = f"https://www.google.com/maps/dir/{stops}/"
         urls.append(url)
         i = ei
-        if i >= n - 1:
-            break
     return urls
 
 
 def _road_route(route_coords):
-    """Obtiene la geometría real de la ruta por calles usando OSRM (sin API key).
-    Retorna lista de (lat, lon). Si falla, retorna las coordenadas originales."""
+    """Geometría real por calles via OSRM. Retorna (geom_coords, dist_km, dur_min).
+    En caso de error retorna (route_coords, None, None)."""
     coords_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in route_coords)
     url = (f"https://router.project-osrm.org/route/v1/driving/{coords_str}"
            f"?overview=full&geometries=geojson")
@@ -283,11 +278,14 @@ def _road_route(route_coords):
         resp = requests.get(url, timeout=10)
         data = resp.json()
         if data.get("code") == "Ok":
-            geom = data["routes"][0]["geometry"]["coordinates"]
-            return [(p[1], p[0]) for p in geom]
+            route = data["routes"][0]
+            geom = [(p[1], p[0]) for p in route["geometry"]["coordinates"]]
+            dist_km = route["distance"] / 1000
+            dur_min = route["duration"] / 60
+            return geom, dist_km, dur_min
     except Exception:
         pass
-    return route_coords
+    return route_coords, None, None
 
 
 def _num_icon(n, color="#1a3a5c"):
@@ -606,20 +604,19 @@ with tab_ruta:
 
                 # Obtener ruta real por calles (OSRM, sin API key)
                 with st.spinner("Trazando ruta por calles reales (OSRM)..."):
-                    road_geom = _road_route(route_coords)
-                    used_osrm = (road_geom is not route_coords)
+                    road_geom, osrm_km, osrm_min = _road_route(route_coords)
+                    used_osrm = osrm_km is not None
 
                 if used_osrm:
                     folium.PolyLine(
-                        road_geom, color="#1a73e8", weight=4, opacity=0.75,
+                        road_geom, color="#1a73e8", weight=4, opacity=0.78,
                     ).add_to(mc)
                 else:
-                    # Fallback: línea recta punteada con aviso
                     folium.PolyLine(
                         route_coords, color="#1a73e8", weight=2,
                         opacity=0.5, dash_array="6 5",
                     ).add_to(mc)
-                    st.warning("No se pudo conectar a OSRM. Las líneas son en línea recta.")
+                    st.warning("No se pudo conectar a OSRM. Las líneas son de referencia (línea recta).")
 
                 folium.Marker(
                     [orig_lat, orig_lon],
@@ -644,34 +641,52 @@ with tab_ruta:
 
                 st_folium(mc, width="100%", height=440, returned_objects=[])
                 if used_osrm:
-                    st.caption("✅ Ruta trazada por calles reales (OSRM). La distancia mostrada es en línea recta; Google Maps mostrará la distancia real.")
+                    st.caption("✅ Ruta trazada por calles reales (OSRM). Google Maps usará sus propias calles al navegar.")
                 else:
-                    st.caption("ℹ️ Sin conexión a OSRM. Las líneas son de referencia. Google Maps navegará por calles reales.")
+                    st.caption("ℹ️ Sin conexión a OSRM — líneas de referencia. Google Maps navegará por calles reales.")
 
                 # ── Métricas ─────────────────────────────────────────────────
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 with m1:
                     st.metric("Paradas", n_schools)
                 with m2:
-                    st.metric("Distancia total (aprox.)", f"{total_km:.1f} km")
+                    km_label = f"{osrm_km:.1f} km" if used_osrm else f"~{total_km:.1f} km"
+                    st.metric("Distancia por calles", km_label)
                 with m3:
-                    st.metric("Distancias usadas", "Ruta real" if use_api else "Línea recta")
+                    if used_osrm:
+                        h, m = divmod(int(osrm_min), 60)
+                        dur_str = f"{h}h {m}min" if h else f"{m} min"
+                    else:
+                        dur_str = "—"
+                    st.metric("Tiempo estimado", dur_str)
+                with m4:
+                    st.metric("Fuente distancias", "OSRM (calles)" if used_osrm else "Haversine (recta)")
 
                 # ── Google Maps URLs ──────────────────────────────────────────
                 gmaps_urls = _gmaps_urls(route_coords, gmode)
                 st.markdown("**🗺️ Abrir en Google Maps**")
                 if len(gmaps_urls) == 1:
                     st.link_button(
-                        f"Navegar ruta completa ({n_schools} paradas)",
+                        f"🚗 Navegar ruta completa ({n_schools} paradas)",
                         gmaps_urls[0],
                         use_container_width=True,
                     )
                 else:
-                    st.caption(f"Ruta dividida en {len(gmaps_urls)} tramos (límite de 25 paradas por URL).")
+                    st.caption(
+                        f"Ruta dividida en {len(gmaps_urls)} tramos "
+                        f"(Google Maps soporta máx. 9 paradas por URL). "
+                        f"Abre cada tramo en orden."
+                    )
+                    # Calcular rangos de paradas por tramo
+                    chunk = 8
                     cols_url = st.columns(len(gmaps_urls))
-                    for i, url in enumerate(gmaps_urls):
-                        with cols_url[i]:
-                            st.link_button(f"Tramo {i + 1}", url, use_container_width=True)
+                    for idx, url in enumerate(gmaps_urls):
+                        start_stop = idx * chunk
+                        end_stop = min(start_stop + chunk, n_schools)
+                        with cols_url[idx]:
+                            label = (f"Tramo {idx+1}\n"
+                                     f"Paradas {start_stop}→{end_stop}")
+                            st.link_button(label, url, use_container_width=True)
 
                 # ── Tabla de orden ────────────────────────────────────────────
                 with st.expander("📋 Ver orden completo de visitas", expanded=True):
