@@ -5,6 +5,7 @@ from streamlit_folium import st_folium
 import pandas as pd
 import math
 import re
+import requests
 
 # ── Configuración de página ────────────────────────────────────────────────────
 st.set_page_config(
@@ -64,33 +65,8 @@ st.markdown("""
   .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
   .stTabs [data-baseweb="tab-border"]    { display: none !important; }
 
-  /* ── Forzar legibilidad en widgets del formulario ── */
-  .stRadio label,
-  .stRadio label span,
-  .stCheckbox label,
-  .stCheckbox label span,
-  .stSelectbox label,
-  .stTextInput label,
-  .stTextArea label,
-  .stNumberInput label,
-  [data-testid="stWidgetLabel"],
-  [data-testid="stWidgetLabel"] p,
-  [data-testid="stMarkdownContainer"] p,
-  .stRadio [data-testid="stMarkdownContainer"] p {
-    color: #1e293b !important;
-  }
-
   /* Expander header */
-  .streamlit-expanderHeader,
-  .streamlit-expanderHeader p {
-    color: #1e293b !important;
-    font-weight: 600;
-  }
-
-  /* Caption / small text */
-  .stCaption, [data-testid="stCaptionContainer"] {
-    color: #475569 !important;
-  }
+  .streamlit-expanderHeader { font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -295,6 +271,23 @@ def _gmaps_urls(route_coords, gmode):
         if i >= n - 1:
             break
     return urls
+
+
+def _road_route(route_coords):
+    """Obtiene la geometría real de la ruta por calles usando OSRM (sin API key).
+    Retorna lista de (lat, lon). Si falla, retorna las coordenadas originales."""
+    coords_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in route_coords)
+    url = (f"https://router.project-osrm.org/route/v1/driving/{coords_str}"
+           f"?overview=full&geometries=geojson")
+    try:
+        resp = requests.get(url, timeout=10)
+        data = resp.json()
+        if data.get("code") == "Ok":
+            geom = data["routes"][0]["geometry"]["coordinates"]
+            return [(p[1], p[0]) for p in geom]
+    except Exception:
+        pass
+    return route_coords
 
 
 def _num_icon(n, color="#1a3a5c"):
@@ -611,11 +604,22 @@ with tab_ruta:
                 )
                 Fullscreen(position="topleft").add_to(mc)
 
-                # Línea de referencia (no sigue calles — es distancia en línea recta)
-                folium.PolyLine(
-                    route_coords, color="#1a73e8", weight=2,
-                    opacity=0.55, dash_array="6 5",
-                ).add_to(mc)
+                # Obtener ruta real por calles (OSRM, sin API key)
+                with st.spinner("Trazando ruta por calles reales (OSRM)..."):
+                    road_geom = _road_route(route_coords)
+                    used_osrm = (road_geom is not route_coords)
+
+                if used_osrm:
+                    folium.PolyLine(
+                        road_geom, color="#1a73e8", weight=4, opacity=0.75,
+                    ).add_to(mc)
+                else:
+                    # Fallback: línea recta punteada con aviso
+                    folium.PolyLine(
+                        route_coords, color="#1a73e8", weight=2,
+                        opacity=0.5, dash_array="6 5",
+                    ).add_to(mc)
+                    st.warning("No se pudo conectar a OSRM. Las líneas son en línea recta.")
 
                 folium.Marker(
                     [orig_lat, orig_lon],
@@ -639,7 +643,10 @@ with tab_ruta:
                     ).add_to(mc)
 
                 st_folium(mc, width="100%", height=440, returned_objects=[])
-                st.caption("ℹ️ Las líneas del mapa son de referencia (distancia recta). La navegación por Google Maps usará calles reales.")
+                if used_osrm:
+                    st.caption("✅ Ruta trazada por calles reales (OSRM). La distancia mostrada es en línea recta; Google Maps mostrará la distancia real.")
+                else:
+                    st.caption("ℹ️ Sin conexión a OSRM. Las líneas son de referencia. Google Maps navegará por calles reales.")
 
                 # ── Métricas ─────────────────────────────────────────────────
                 m1, m2, m3 = st.columns(3)
