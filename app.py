@@ -16,7 +16,8 @@ st.set_page_config(
 # ── Estilos CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  [data-testid="stAppViewContainer"] { background: #f5f7fa; }
+  [data-testid="stAppViewContainer"] { background: #f0f4f8; }
+
   .header-banner {
     background: linear-gradient(135deg, #1a3a5c 0%, #2563a8 100%);
     padding: 1.2rem 1.8rem; border-radius: 12px;
@@ -24,6 +25,7 @@ st.markdown("""
   }
   .header-banner h1 { margin: 0; font-size: 1.6rem; font-weight: 700; }
   .header-banner p  { margin: 0.3rem 0 0; font-size: 0.9rem; opacity: 0.85; }
+
   .metric-card {
     background: white; border-radius: 10px; padding: 1rem;
     text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
@@ -31,6 +33,45 @@ st.markdown("""
   .metric-num   { font-size: 2rem; font-weight: 700; color: #2563a8; }
   .metric-label { font-size: 0.78rem; color: #64748b; text-transform: uppercase; letter-spacing: .05em; }
   .stSelectbox label { font-weight: 600; }
+
+  /* ── Tabs con estilo visual fuerte ── */
+  .stTabs [data-baseweb="tab-list"] {
+    gap: 8px;
+    background: #e2e8f0;
+    padding: 6px 8px;
+    border-radius: 12px;
+    margin-bottom: 1rem;
+  }
+  .stTabs [data-baseweb="tab"] {
+    background: transparent;
+    border-radius: 8px;
+    padding: 10px 22px;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #475569;
+    border: none;
+    transition: all 0.2s;
+  }
+  .stTabs [data-baseweb="tab"]:hover {
+    background: #cbd5e1;
+    color: #1e293b;
+  }
+  /* Tab activa — Mapa */
+  .stTabs [aria-selected="true"]:nth-child(1),
+  .stTabs [data-baseweb="tab"][aria-selected="true"]:first-child {
+    background: #2563a8 !important;
+    color: white !important;
+    box-shadow: 0 2px 8px rgba(37,99,168,0.35);
+  }
+  /* Tab activa — general */
+  .stTabs [aria-selected="true"] {
+    background: #1a3a5c !important;
+    color: white !important;
+    box-shadow: 0 2px 8px rgba(26,58,92,0.3);
+  }
+  /* Quitar la línea roja/azul por defecto de Streamlit */
+  .stTabs [data-baseweb="tab-highlight"] { display: none !important; }
+  .stTabs [data-baseweb="tab-border"]    { display: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
