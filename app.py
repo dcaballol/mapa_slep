@@ -214,31 +214,32 @@ def _osrm_time_matrix(coords):
 
 def _ors_optimize(coords, ors_key, round_trip):
     """OpenRouteService Optimization API (Vroom VRP solver). Gratis, sin tarjeta.
-    coords[0] = origen. Devuelve lista de índices ordenados, o None si falla."""
+    coords[0] = origen. Devuelve (índices_ordenados, None) o (None, mensaje_error)."""
     jobs = [
         {"id": i, "location": [coords[i][1], coords[i][0]]}
         for i in range(1, len(coords))
     ]
-    vehicle = {
-        "id": 0,
-        "start": [coords[0][1], coords[0][0]],
-    }
+    vehicle = {"id": 0, "start": [coords[0][1], coords[0][0]]}
     if round_trip:
         vehicle["end"] = [coords[0][1], coords[0][0]]
+    # JWT tokens (empiezan con "ey") necesitan prefijo Bearer
+    key = ors_key.strip()
+    auth = f"Bearer {key}" if key.startswith("ey") else key
     try:
         resp = requests.post(
             "https://api.openrouteservice.org/optimization",
             json={"jobs": jobs, "vehicles": [vehicle]},
-            headers={"Authorization": ors_key, "Content-Type": "application/json"},
+            headers={"Authorization": auth, "Content-Type": "application/json"},
             timeout=20,
         )
         data = resp.json()
         if "routes" in data and data["routes"]:
             steps = [s for s in data["routes"][0]["steps"] if s["type"] == "job"]
-            return [0] + [s["id"] for s in steps]
-    except Exception:
-        pass
-    return None
+            return [0] + [s["id"] for s in steps], None
+        err = data.get("error", data.get("message", str(data)))
+        return None, f"HTTP {resp.status_code}: {err}"
+    except Exception as e:
+        return None, str(e)
 
 
 def _gmaps_directions_optimize(coords, key, mode):
@@ -789,12 +790,12 @@ with tab_ruta:
 
                 with st.spinner("Optimizando orden de visitas..."):
                     if ors_key_in:
-                        ors_result = _ors_optimize(coords, ors_key_in, round_trip)
+                        ors_result, ors_err = _ors_optimize(coords, ors_key_in, round_trip)
                         if ors_result:
                             route = ors_result
                             st.success("✅ Ruta optimizada por OpenRouteService (solver Vroom — logística profesional)")
                         else:
-                            st.warning("⚠️ ORS no respondió — usando algoritmo local.")
+                            st.warning(f"⚠️ ORS no respondió — usando algoritmo local.  \n`{ors_err}`")
                             osrm_mat = _osrm_time_matrix(coords)
                             opt_mat = osrm_mat if osrm_mat is not None else _haversine_matrix(coords)
                             route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
