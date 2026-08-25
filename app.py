@@ -323,6 +323,12 @@ def _num_icon(n, color="#1a3a5c"):
     )
 
 
+# ── Session state ──────────────────────────────────────────────────────────────
+if "favorites" not in st.session_state:
+    st.session_state["favorites"] = set()
+if "rbds_input" not in st.session_state:
+    st.session_state["rbds_input"] = ""
+
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="header-banner">
@@ -460,9 +466,35 @@ with tab_ruta:
     col_ctrl, col_res = st.columns([1, 2], gap="medium")
 
     with col_ctrl:
+        # ── Favoritos ──────────────────────────────────────────────────────
+        with st.expander("⭐ Favoritos", expanded=False):
+            st.caption("Marca los establecimientos que visitas frecuentemente para cargarlos rápido.")
+            all_rbd_opts = df["RBD"].tolist()
+            fav_stored = [r for r in st.session_state["favorites"] if r in all_rbd_opts]
+            fav_sel = st.multiselect(
+                "Establecimientos favoritos",
+                options=all_rbd_opts,
+                default=fav_stored,
+                format_func=lambda r: f"{r} · {df[df['RBD']==r]['Establecimiento'].values[0]}",
+                label_visibility="collapsed",
+            )
+            cf1, cf2 = st.columns(2)
+            with cf1:
+                if st.button("💾 Guardar", use_container_width=True):
+                    st.session_state["favorites"] = set(fav_sel)
+                    st.success(f"✅ {len(fav_sel)} favoritos guardados")
+            with cf2:
+                if st.button("📥 Cargar en ruta", use_container_width=True,
+                             disabled=not st.session_state["favorites"]):
+                    st.session_state["rbds_input"] = "\n".join(
+                        str(r) for r in sorted(str(r) for r in st.session_state["favorites"])
+                    )
+                    st.rerun()
+
         rbds_raw = st.text_area(
             "📋 RBDs a visitar",
-            height=200,
+            key="rbds_input",
+            height=190,
             placeholder="Pega los RBDs aquí, uno por línea.\nAcepta formato 'RBD - Nombre' o solo el número:\n\n9863 - Liceo Santiago Bueras\n9864\n9865\n...",
             help="Acepta 'RBD', 'RBD - Nombre', separados por línea, coma o punto y coma.",
         )
@@ -496,7 +528,24 @@ with tab_ruta:
             orig_lat_val, orig_lon_val = sel_r["LAT"], sel_r["LONG"]
             st.caption(f"📍 {sel_r['Dirección']}")
 
-        round_trip = st.checkbox("🔄 Ruta circular (volver al origen al final)")
+        st.markdown("**🏁 Punto de término**")
+        end_tipo = st.radio(
+            "Término",
+            ["🏠 Volver al inicio (ruta circular)",
+             "🏁 Terminar en el último establecimiento",
+             "📌 Terminar en coordenadas específicas"],
+            label_visibility="collapsed",
+        )
+        round_trip  = end_tipo.startswith("🏠")
+        custom_end  = end_tipo.startswith("📌")
+        end_lat_val = end_lon_val = None
+        if custom_end:
+            st.caption("Coordenadas del punto final (clic derecho en Google Maps).")
+            ce1, ce2 = st.columns(2)
+            with ce1:
+                end_lat_val = st.number_input("Latitud fin", value=-33.4650, format="%.4f", step=0.0001)
+            with ce2:
+                end_lon_val = st.number_input("Longitud fin", value=-70.7020, format="%.4f", step=0.0001)
 
         modo_opts = {"🚗 Auto": "driving", "🚌 Transporte público": "transit", "🚶 A pie": "walking"}
         modo_label = st.radio("Modo de viaje", list(modo_opts.keys()))
@@ -616,6 +665,8 @@ with tab_ruta:
                 route_coords = [(orig_lat, orig_lon)] + list(zip(ordered["LAT"], ordered["LONG"]))
                 if round_trip:
                     route_coords.append((orig_lat, orig_lon))
+                elif custom_end and end_lat_val is not None:
+                    route_coords.append((end_lat_val, end_lon_val))
 
                 total_km = sum(
                     _haversine(route_coords[i][0], route_coords[i][1],
@@ -647,25 +698,38 @@ with tab_ruta:
                     ).add_to(mc)
                     st.warning("No se pudo conectar a OSRM. Las líneas son de referencia (línea recta).")
 
+                inicio_label = "🏠 Inicio / Fin" if round_trip else "🏠 Inicio"
                 folium.Marker(
                     [orig_lat, orig_lon],
-                    popup="📍 Punto de inicio",
-                    tooltip="📍 Inicio",
+                    popup=inicio_label,
+                    tooltip=inicio_label,
                     icon=folium.Icon(color="blue", icon="home", prefix="fa"),
                 ).add_to(mc)
 
+                total_stops = len(ordered)
                 for i, (_, row) in enumerate(ordered.iterrows()):
                     cfg = COMUNA_CONFIG.get(row["Comuna"], {"color": "#3498db"})
+                    is_last = (i == total_stops - 1)
+                    stop_label = f"Parada #{i + 1}" + (" · ÚLTIMO" if is_last and not round_trip else "")
                     popup_html = (
-                        f"<b>Parada #{i + 1}</b><br>"
+                        f"<b>{stop_label}</b><br>"
                         f"<b>{row['Establecimiento']}</b><br>"
                         f"<small>📍 {row['Dirección']}<br>🔑 RBD: {row['RBD']}</small>"
                     )
+                    marker_color = "#c0392b" if (is_last and not round_trip and not custom_end) else cfg["color"]
                     folium.Marker(
                         [row["LAT"], row["LONG"]],
                         popup=folium.Popup(popup_html, max_width=240),
                         tooltip=f"#{i + 1} · {row['Establecimiento']}",
-                        icon=_num_icon(i + 1, cfg["color"]),
+                        icon=_num_icon(i + 1, marker_color),
+                    ).add_to(mc)
+
+                if custom_end and end_lat_val is not None:
+                    folium.Marker(
+                        [end_lat_val, end_lon_val],
+                        popup="🏁 Punto de término",
+                        tooltip="🏁 Fin",
+                        icon=folium.Icon(color="red", icon="flag", prefix="fa"),
                     ).add_to(mc)
 
                 st_folium(mc, width="100%", height=440, returned_objects=[])
