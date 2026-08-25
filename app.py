@@ -212,6 +212,27 @@ def _osrm_time_matrix(coords):
     return None
 
 
+def _gmaps_directions_optimize(coords, key, mode):
+    """Directions API con waypoints optimize:true — Google resuelve el TSP directamente.
+    coords[0] = origen fijo. Devuelve lista de índices de coords en orden óptimo, o None."""
+    if not _GMAPS_OK or len(coords) > 25:
+        return None
+    try:
+        client = _gm.Client(key=key)
+        origin = f"{coords[0][0]:.6f},{coords[0][1]:.6f}"
+        waypoints = ["optimize:true"] + [f"{c[0]:.6f},{c[1]:.6f}" for c in coords[1:]]
+        result = client.directions(
+            origin=origin, destination=origin,
+            waypoints=waypoints, mode=mode,
+        )
+        if result:
+            order = result[0]["waypoint_order"]
+            return [0] + [o + 1 for o in order]
+    except Exception:
+        pass
+    return None
+
+
 def _gmaps_matrix(coords, key, mode):
     client = _gm.Client(key=key)
     n = len(coords)
@@ -588,9 +609,10 @@ with tab_ruta:
             label_visibility="collapsed",
         )
 
-        # Defaults: usa origen favorito guardado si existe
-        _def_lat = st.session_state["fav_origin"][0] if st.session_state["fav_origin"] else -33.4650
-        _def_lon = st.session_state["fav_origin"][1] if st.session_state["fav_origin"] else -70.7020
+        # Default: SLEP Santa Corina, o favorito guardado si existe
+        _SLEP_LAT, _SLEP_LON = -33.4975610067349, -70.75632209179267
+        _def_lat = st.session_state["fav_origin"][0] if st.session_state["fav_origin"] else _SLEP_LAT
+        _def_lon = st.session_state["fav_origin"][1] if st.session_state["fav_origin"] else _SLEP_LON
         orig_lat_val, orig_lon_val = _def_lat, _def_lon
 
         if orig_tipo == "Desde una dirección / coordenadas":
@@ -639,9 +661,9 @@ with tab_ruta:
             st.caption("Coordenadas del punto final (clic derecho en Google Maps).")
             ce1, ce2 = st.columns(2)
             with ce1:
-                end_lat_val = st.number_input("Latitud fin", value=-33.4650, format="%.4f", step=0.0001)
+                end_lat_val = st.number_input("Latitud fin", value=-33.4975610067349, format="%.6f", step=0.0001)
             with ce2:
-                end_lon_val = st.number_input("Longitud fin", value=-70.7020, format="%.4f", step=0.0001)
+                end_lon_val = st.number_input("Longitud fin", value=-70.75632209179267, format="%.6f", step=0.0001)
 
         modo_opts = {"🚗 Auto": "driving", "🚌 Transporte público": "transit", "🚶 A pie": "walking"}
         modo_label = st.radio("Modo de viaje", list(modo_opts.keys()))
@@ -729,25 +751,35 @@ with tab_ruta:
 
                 use_api = bool(api_key_in and _GMAPS_OK)
 
+                gmaps_route = None
                 with st.spinner("Calculando tiempos de viaje..."):
                     if use_api:
                         try:
                             _dist_mat, opt_mat = _gmaps_matrix(coords, api_key_in, gmode)
-                            st.success("✅ Optimizando por tiempo real (Google Maps Distance Matrix API)")
                         except Exception as exc:
-                            st.warning(f"Error con la API: {exc}. Se usará OSRM.")
+                            st.warning(f"Error con Distance Matrix API: {exc}. Se usará OSRM.")
                             opt_mat = _osrm_time_matrix(coords) or _haversine_matrix(coords)
                     else:
                         osrm_mat = _osrm_time_matrix(coords)
-                        if osrm_mat is not None:
-                            opt_mat = osrm_mat
-                            st.caption("⏱️ Optimizando por tiempo real de conducción (OSRM)")
-                        else:
-                            opt_mat = _haversine_matrix(coords)
-                            st.caption("📐 Optimizando por distancia en línea recta (sin conexión a OSRM)")
+                        opt_mat = osrm_mat if osrm_mat is not None else _haversine_matrix(coords)
+                        if osrm_mat is None:
+                            st.caption("📐 Sin conexión a OSRM — usando distancia en línea recta")
 
-                with st.spinner("Optimizando ruta (múltiples arranques + 2-opt + Or-opt)..."):
-                    route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
+                with st.spinner("Optimizando orden de visitas..."):
+                    if use_api and n_schools <= 23:
+                        gmaps_route = _gmaps_directions_optimize(coords, api_key_in, gmode)
+                        if gmaps_route:
+                            route = gmaps_route
+                            st.success("✅ Orden optimizado por Google Maps Directions API (TSP real)")
+                        else:
+                            route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
+                            st.caption("⚠️ Directions API no disponible — usando algoritmo local")
+                    else:
+                        route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
+                        if use_api:
+                            st.caption("ℹ️ Más de 23 paradas — usando algoritmo local (límite de Directions API)")
+                        else:
+                            st.caption("⏱️ Orden optimizado con múltiples arranques + 2-opt + Or-opt (OSRM)")
 
                 # Índices de colegios en school_df
                 school_indices = [r - 1 for r in route[1:]]
