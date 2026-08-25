@@ -212,6 +212,35 @@ def _osrm_time_matrix(coords):
     return None
 
 
+def _ors_optimize(coords, ors_key, round_trip):
+    """OpenRouteService Optimization API (Vroom VRP solver). Gratis, sin tarjeta.
+    coords[0] = origen. Devuelve lista de índices ordenados, o None si falla."""
+    jobs = [
+        {"id": i, "location": [coords[i][1], coords[i][0]]}
+        for i in range(1, len(coords))
+    ]
+    vehicle = {
+        "id": 0,
+        "start": [coords[0][1], coords[0][0]],
+    }
+    if round_trip:
+        vehicle["end"] = [coords[0][1], coords[0][0]]
+    try:
+        resp = requests.post(
+            "https://api.openrouteservice.org/optimization",
+            json={"jobs": jobs, "vehicles": [vehicle]},
+            headers={"Authorization": ors_key, "Content-Type": "application/json"},
+            timeout=20,
+        )
+        data = resp.json()
+        if "routes" in data and data["routes"]:
+            steps = [s for s in data["routes"][0]["steps"] if s["type"] == "job"]
+            return [0] + [s["id"] for s in steps]
+    except Exception:
+        pass
+    return None
+
+
 def _gmaps_directions_optimize(coords, key, mode):
     """Directions API con waypoints optimize:true — Google resuelve el TSP directamente.
     coords[0] = origen fijo. Devuelve lista de índices de coords en orden óptimo, o None."""
@@ -670,17 +699,24 @@ with tab_ruta:
         gmode = modo_opts[modo_label]
 
         with st.expander("⚙️ Configuración avanzada"):
+            ors_key_in = st.text_input(
+                "API Key OpenRouteService (recomendado, gratis)",
+                type="password",
+                help="Obtén tu clave gratis en openrouteservice.org — sin tarjeta de crédito. Activa el solver Vroom para optimización profesional de rutas.",
+            )
+            if ors_key_in:
+                st.caption("✅ Se usará ORS Vroom (solver logístico profesional, gratis)")
             api_key_in = st.text_input(
                 "API Key Google Maps (opcional)",
                 type="password",
-                help="Con una API Key se calculan distancias reales de ruta (Distance Matrix API). Sin ella se usa distancia en línea recta (Haversine).",
+                help="Requiere cuenta de facturación en Google Cloud. Si tienes una, activa Distance Matrix + Directions API.",
             )
             if api_key_in and not _GMAPS_OK:
                 st.warning("Para usar la API instala: `pip install googlemaps`")
             use_2opt = st.checkbox(
-                "Mejorar con 2-opt",
+                "Mejorar con 2-opt (algoritmo local)",
                 value=True,
-                help="Aplica mejora local sobre la ruta inicial. Para más de 25 paradas se omite automáticamente.",
+                help="Solo aplica cuando no hay clave ORS ni Google Maps.",
             )
 
         calcular = st.button("🔄 Calcular Ruta Óptima", type="primary", use_container_width=True)
@@ -751,35 +787,37 @@ with tab_ruta:
 
                 use_api = bool(api_key_in and _GMAPS_OK)
 
-                gmaps_route = None
-                with st.spinner("Calculando tiempos de viaje..."):
-                    if use_api:
+                with st.spinner("Optimizando orden de visitas..."):
+                    if ors_key_in:
+                        ors_result = _ors_optimize(coords, ors_key_in, round_trip)
+                        if ors_result:
+                            route = ors_result
+                            st.success("✅ Ruta optimizada por OpenRouteService (solver Vroom — logística profesional)")
+                        else:
+                            st.warning("⚠️ ORS no respondió — usando algoritmo local.")
+                            osrm_mat = _osrm_time_matrix(coords)
+                            opt_mat = osrm_mat if osrm_mat is not None else _haversine_matrix(coords)
+                            route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
+                    elif use_api and n_schools <= 23:
                         try:
                             _dist_mat, opt_mat = _gmaps_matrix(coords, api_key_in, gmode)
                         except Exception as exc:
-                            st.warning(f"Error con Distance Matrix API: {exc}. Se usará OSRM.")
+                            st.warning(f"Error Distance Matrix API: {exc}. Se usará OSRM.")
                             opt_mat = _osrm_time_matrix(coords) or _haversine_matrix(coords)
+                        gmaps_route = _gmaps_directions_optimize(coords, api_key_in, gmode)
+                        if gmaps_route:
+                            route = gmaps_route
+                            st.success("✅ Optimizado por Google Maps Directions API")
+                        else:
+                            route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
+                            st.caption("⚠️ Directions API no disponible — usando algoritmo local")
                     else:
                         osrm_mat = _osrm_time_matrix(coords)
                         opt_mat = osrm_mat if osrm_mat is not None else _haversine_matrix(coords)
                         if osrm_mat is None:
                             st.caption("📐 Sin conexión a OSRM — usando distancia en línea recta")
-
-                with st.spinner("Optimizando orden de visitas..."):
-                    if use_api and n_schools <= 23:
-                        gmaps_route = _gmaps_directions_optimize(coords, api_key_in, gmode)
-                        if gmaps_route:
-                            route = gmaps_route
-                            st.success("✅ Orden optimizado por Google Maps Directions API (TSP real)")
-                        else:
-                            route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
-                            st.caption("⚠️ Directions API no disponible — usando algoritmo local")
-                    else:
                         route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
-                        if use_api:
-                            st.caption("ℹ️ Más de 23 paradas — usando algoritmo local (límite de Directions API)")
-                        else:
-                            st.caption("⏱️ Orden optimizado con múltiples arranques + 2-opt + Or-opt (OSRM)")
+                        st.caption("⏱️ Ruta optimizada con múltiples arranques + 2-opt + Or-opt (OSRM)")
 
                 # Índices de colegios en school_df
                 school_indices = [r - 1 for r in route[1:]]
