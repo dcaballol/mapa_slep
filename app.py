@@ -1,4 +1,5 @@
 import streamlit as st
+import random
 import folium
 from folium.plugins import MarkerCluster, Fullscreen
 from streamlit_folium import st_folium
@@ -307,6 +308,40 @@ def _optimize(route, mat, use_2opt=True):
             route = _two_opt(route, mat)
         route = _or_opt(route, mat)
     return route
+
+
+def _total_cost(route, mat):
+    return sum(mat[route[i]][route[i + 1]] for i in range(len(route) - 1))
+
+
+def _multi_start_optimize(mat, use_2opt=True):
+    """Múltiples arranques aleatorios: construye N rutas distintas, optimiza
+    cada una con 2-opt+Or-opt y devuelve la de menor costo total."""
+    n = len(mat)
+    # cuántos arranques según tamaño del problema
+    if n <= 17:
+        n_restarts = 120
+    elif n <= 22:
+        n_restarts = 60
+    elif n <= 32:
+        n_restarts = 25
+    else:
+        n_restarts = 8
+
+    best_route = _optimize(_nn_route(mat), mat, use_2opt)
+    best_cost  = _total_cost(best_route, mat)
+
+    rng = random.Random(42)
+    indices = list(range(1, n))
+    for _ in range(n_restarts):
+        rng.shuffle(indices)
+        candidate = _optimize([0] + list(indices), mat, use_2opt)
+        cost = _total_cost(candidate, mat)
+        if cost < best_cost:
+            best_cost  = cost
+            best_route = candidate
+
+    return best_route
 
 
 def _gmaps_urls(route_coords, gmode):
@@ -711,13 +746,8 @@ with tab_ruta:
                             opt_mat = _haversine_matrix(coords)
                             st.caption("📐 Optimizando por distancia en línea recta (sin conexión a OSRM)")
 
-                with st.spinner("Optimizando ruta (2-opt + Or-opt)..."):
-                    route = _nn_route(opt_mat)
-                    if n_schools <= 30:
-                        route = _optimize(route, opt_mat, use_2opt=use_2opt)
-                    else:
-                        route = _or_opt(route, opt_mat)
-                        st.caption("ℹ️ 2-opt omitido (más de 30 paradas). Se aplica Or-opt.")
+                with st.spinner("Optimizando ruta (múltiples arranques + 2-opt + Or-opt)..."):
+                    route = _multi_start_optimize(opt_mat, use_2opt=use_2opt)
 
                 # Índices de colegios en school_df
                 school_indices = [r - 1 for r in route[1:]]
