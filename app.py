@@ -328,6 +328,8 @@ if "favorites" not in st.session_state:
     st.session_state["favorites"] = set()
 if "rbds_input" not in st.session_state:
     st.session_state["rbds_input"] = ""
+if "fav_origin" not in st.session_state:
+    st.session_state["fav_origin"] = None  # (lat, lon) guardado como origen favorito
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -506,16 +508,30 @@ with tab_ruta:
             label_visibility="collapsed",
         )
 
-        # Defaults: SLEP Santa Corina (Estación Central, zona central de colegios)
-        orig_lat_val, orig_lon_val = -33.4650, -70.7020
+        # Defaults: usa origen favorito guardado si existe
+        _def_lat = st.session_state["fav_origin"][0] if st.session_state["fav_origin"] else -33.4650
+        _def_lon = st.session_state["fav_origin"][1] if st.session_state["fav_origin"] else -70.7020
+        orig_lat_val, orig_lon_val = _def_lat, _def_lon
 
         if orig_tipo == "Desde una dirección / coordenadas":
-            st.caption("Ingresa las coordenadas de tu punto de partida (puedes obtenerlas haciendo clic derecho en Google Maps).")
+            if st.session_state["fav_origin"]:
+                st.caption(f"⭐ Usando origen favorito guardado: {_def_lat:.6f}, {_def_lon:.6f}")
+            else:
+                st.caption("Ingresa las coordenadas de tu punto de partida (puedes obtenerlas haciendo clic derecho en Google Maps).")
             c1, c2 = st.columns(2)
             with c1:
-                orig_lat_val = st.number_input("Latitud", value=-33.4650, format="%.4f", step=0.0001)
+                orig_lat_val = st.number_input("Latitud", value=_def_lat, format="%.6f", step=0.0001)
             with c2:
-                orig_lon_val = st.number_input("Longitud", value=-70.7020, format="%.4f", step=0.0001)
+                orig_lon_val = st.number_input("Longitud", value=_def_lon, format="%.6f", step=0.0001)
+            cs1, cs2 = st.columns(2)
+            with cs1:
+                if st.button("⭐ Guardar como favorito", use_container_width=True):
+                    st.session_state["fav_origin"] = (orig_lat_val, orig_lon_val)
+                    st.success("✅ Origen guardado")
+            with cs2:
+                if st.session_state["fav_origin"] and st.button("🗑️ Borrar favorito", use_container_width=True):
+                    st.session_state["fav_origin"] = None
+                    st.rerun()
 
         elif orig_tipo == "Desde un establecimiento de la lista":
             all_rbds = df["RBD"].tolist()
