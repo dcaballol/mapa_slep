@@ -197,6 +197,20 @@ def _haversine_matrix(coords):
              for j in range(n)] for i in range(n)]
 
 
+def _osrm_time_matrix(coords):
+    """Matriz de tiempos de conducción (minutos) vía OSRM Table API. Retorna None si falla."""
+    coords_str = ";".join(f"{lon:.6f},{lat:.6f}" for lat, lon in coords)
+    url = f"https://router.project-osrm.org/table/v1/driving/{coords_str}?annotations=duration"
+    try:
+        resp = requests.get(url, timeout=15)
+        data = resp.json()
+        if data.get("code") == "Ok":
+            return [[v / 60 for v in row] for row in data["durations"]]
+    except Exception:
+        pass
+    return None
+
+
 def _gmaps_matrix(coords, key, mode):
     client = _gm.Client(key=key)
     n = len(coords)
@@ -569,24 +583,29 @@ with tab_ruta:
                 coords = [(orig_lat, orig_lon)] + list(zip(school_df["LAT"], school_df["LONG"]))
 
                 use_api = bool(api_key_in and _GMAPS_OK)
-                dur_mat = None
 
-                with st.spinner("Calculando distancias..."):
+                with st.spinner("Calculando tiempos de viaje..."):
                     if use_api:
                         try:
-                            mat, dur_mat = _gmaps_matrix(coords, api_key_in, gmode)
-                            st.success("✅ Usando distancias reales de Google Maps (Distance Matrix API)")
+                            _dist_mat, opt_mat = _gmaps_matrix(coords, api_key_in, gmode)
+                            st.success("✅ Optimizando por tiempo real (Google Maps Distance Matrix API)")
                         except Exception as exc:
-                            st.warning(f"Error con la API: {exc}. Se usará Haversine.")
-                            mat = _haversine_matrix(coords)
+                            st.warning(f"Error con la API: {exc}. Se usará OSRM.")
+                            opt_mat = _osrm_time_matrix(coords) or _haversine_matrix(coords)
                     else:
-                        mat = _haversine_matrix(coords)
+                        osrm_mat = _osrm_time_matrix(coords)
+                        if osrm_mat is not None:
+                            opt_mat = osrm_mat
+                            st.caption("⏱️ Optimizando por tiempo real de conducción (OSRM)")
+                        else:
+                            opt_mat = _haversine_matrix(coords)
+                            st.caption("📐 Optimizando por distancia en línea recta (sin conexión a OSRM)")
 
                 with st.spinner("Optimizando ruta..."):
-                    route = _nn_route(mat)
+                    route = _nn_route(opt_mat)
                     if use_2opt:
                         if n_schools <= 25:
-                            route = _two_opt(route, mat)
+                            route = _two_opt(route, opt_mat)
                         else:
                             st.caption("ℹ️ 2-opt omitido (más de 25 paradas). Se usa el resultado del Vecino Más Cercano.")
 
