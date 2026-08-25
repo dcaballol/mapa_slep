@@ -212,17 +212,20 @@ def _osrm_time_matrix(coords):
     return None
 
 
-def _ors_optimize(coords, ors_key, round_trip):
+_ORS_PROFILE = {"driving": "driving-car", "transit": "driving-car", "walking": "foot-walking"}
+
+
+def _ors_optimize(coords, ors_key, round_trip, gmode="driving"):
     """OpenRouteService Optimization API (Vroom VRP solver). Gratis, sin tarjeta.
     coords[0] = origen. Devuelve (índices_ordenados, None) o (None, mensaje_error)."""
     jobs = [
         {"id": i, "location": [coords[i][1], coords[i][0]]}
         for i in range(1, len(coords))
     ]
-    vehicle = {"id": 0, "start": [coords[0][1], coords[0][0]]}
+    profile = _ORS_PROFILE.get(gmode, "driving-car")
+    vehicle = {"id": 0, "profile": profile, "start": [coords[0][1], coords[0][0]]}
     if round_trip:
         vehicle["end"] = [coords[0][1], coords[0][0]]
-    # JWT tokens (empiezan con "ey") necesitan prefijo Bearer
     key = ors_key.strip()
     auth = f"Bearer {key}" if key.startswith("ey") else key
     try:
@@ -790,7 +793,7 @@ with tab_ruta:
 
                 with st.spinner("Optimizando orden de visitas..."):
                     if ors_key_in:
-                        ors_result, ors_err = _ors_optimize(coords, ors_key_in, round_trip)
+                        ors_result, ors_err = _ors_optimize(coords, ors_key_in, round_trip, gmode)
                         if ors_result:
                             route = ors_result
                             st.success("✅ Ruta optimizada por OpenRouteService (solver Vroom — logística profesional)")
