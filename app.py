@@ -264,6 +264,51 @@ def _two_opt(route, mat):
     return best
 
 
+def _or_opt(route, mat):
+    """Or-opt: reubica cada parada en la posición que minimiza el tiempo total.
+    Mucho más efectivo que 2-opt para eliminar desvíos a puntos aislados."""
+    best = list(route)
+    n = len(best)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, n):  # el origen (índice 0) no se mueve
+            node = best[i]
+            prev_i = best[i - 1]
+            next_i = best[i + 1] if i + 1 < n else None
+            # ganancia al quitar node de su posición actual
+            cost_out = mat[prev_i][node] + (mat[node][next_i] if next_i is not None else 0)
+            cost_bridge = mat[prev_i][next_i] if next_i is not None else 0
+            gain_remove = cost_out - cost_bridge
+            best_delta, best_j = 1e-9, -1
+            for j in range(n - 1):
+                if j == i - 1 or j == i:
+                    continue
+                cost_in = mat[best[j]][node] + mat[node][best[j + 1]] - mat[best[j]][best[j + 1]]
+                delta = gain_remove - cost_in
+                if delta > best_delta:
+                    best_delta, best_j = delta, j
+            if best_j >= 0:
+                new_route = list(best)
+                new_route.pop(i)
+                new_route.insert(best_j + 1 if best_j < i else best_j, node)
+                best = new_route
+                improved = True
+                break
+    return best
+
+
+def _optimize(route, mat, use_2opt=True):
+    """Combina 2-opt y Or-opt en iteración hasta convergencia."""
+    prev = None
+    while prev != route:
+        prev = list(route)
+        if use_2opt:
+            route = _two_opt(route, mat)
+        route = _or_opt(route, mat)
+    return route
+
+
 def _gmaps_urls(route_coords, gmode):
     """URL de Google Maps con todas las paradas en una sola URL cuando es posible.
     Usa formato ?api=1 (hasta 23 waypoints = 25 paradas totales por URL).
@@ -666,13 +711,13 @@ with tab_ruta:
                             opt_mat = _haversine_matrix(coords)
                             st.caption("📐 Optimizando por distancia en línea recta (sin conexión a OSRM)")
 
-                with st.spinner("Optimizando ruta..."):
+                with st.spinner("Optimizando ruta (2-opt + Or-opt)..."):
                     route = _nn_route(opt_mat)
-                    if use_2opt:
-                        if n_schools <= 25:
-                            route = _two_opt(route, opt_mat)
-                        else:
-                            st.caption("ℹ️ 2-opt omitido (más de 25 paradas). Se usa el resultado del Vecino Más Cercano.")
+                    if n_schools <= 30:
+                        route = _optimize(route, opt_mat, use_2opt=use_2opt)
+                    else:
+                        route = _or_opt(route, opt_mat)
+                        st.caption("ℹ️ 2-opt omitido (más de 30 paradas). Se aplica Or-opt.")
 
                 # Índices de colegios en school_df
                 school_indices = [r - 1 for r in route[1:]]
